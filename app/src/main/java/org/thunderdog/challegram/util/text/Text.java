@@ -57,6 +57,7 @@ import org.thunderdog.challegram.tool.Strings;
 import org.thunderdog.challegram.tool.UI;
 import org.thunderdog.challegram.tool.Views;
 import org.thunderdog.challegram.unsorted.Settings;
+import org.thunderdog.challegram.util.EmojiStatusHelper;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -1222,7 +1223,7 @@ public class Text implements Runnable, Emoji.CountLimiter, CounterAnimator.TextD
 
     if (entity != null && entity.isCustomEmoji()) {
       String emojiCode = in.substring(start, end);
-      EmojiInfo info = Emoji.instance().getEmojiInfo(emojiCode, true);
+      EmojiInfo info = emojiCode.equals(EmojiStatusHelper.CUSTOM_EMOJI) ? null : Emoji.instance().getEmojiInfo(emojiCode, true);
       processEmoji(in, start, end, info, out, entity);
       return;
     }

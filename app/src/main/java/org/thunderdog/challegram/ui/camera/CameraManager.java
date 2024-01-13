@@ -262,6 +262,9 @@ public abstract class CameraManager <T extends View> {
 
     if (isVideo) {
       setTakingVideo(false, -1);
+      UI.post(() -> {
+        setFinishingVideo(false);
+      }, 20);
       UI.showToast(R.string.TakeVideoError, Toast.LENGTH_SHORT);
     } else {
       setTakingPhoto(false);

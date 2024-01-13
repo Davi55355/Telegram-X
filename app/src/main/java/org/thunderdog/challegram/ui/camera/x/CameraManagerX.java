@@ -22,7 +22,6 @@ import android.view.TextureView;
 import android.view.View;
 
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.camera.core.AspectRatio;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraInfoUnavailableException;
@@ -31,9 +30,13 @@ import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.Preview;
-import androidx.camera.core.VideoCapture;
 import androidx.camera.core.ZoomState;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.camera.video.FileOutputOptions;
+import androidx.camera.video.Recorder;
+import androidx.camera.video.Recording;
+import androidx.camera.video.VideoCapture;
+import androidx.camera.video.VideoRecordEvent;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
@@ -55,7 +58,6 @@ import java.util.concurrent.ExecutionException;
 @TargetApi(Build.VERSION_CODES.LOLLIPOP)
 public class CameraManagerX extends CameraManager<PreviewView> {
   private static final boolean REUSE_PREVIEW_DISABLED = true;
-  private static final boolean REUSE_CAPTURE_DISABLED = true;
 
   public CameraManagerX (Context context, CameraDelegate delegate) {
     super(context, delegate);
@@ -74,7 +76,9 @@ public class CameraManagerX extends CameraManager<PreviewView> {
   private boolean isOpen;
   private ProcessCameraProvider cameraProvider;
   private ImageCapture imageCapture;
-  private VideoCapture videoCapture;
+  private VideoCapture<Recorder> videoCapture;
+  private Recording videoRecording;
+  private VideoRecordEvent videoRecordStatus;
   private Preview preview;
   private int previewRotation;
   private Camera camera;
@@ -201,33 +205,23 @@ public class CameraManagerX extends CameraManager<PreviewView> {
       preview = previewBuilder.build();
     }
 
-    if (REUSE_CAPTURE_DISABLED || imageCapture == null) {
-      ImageCapture.Builder imageCaptureBuilder = new ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        .setFlashMode(flashMode)
-        .setTargetRotation(getSurfaceRotation());
-      if (aspectRatioCustom != null) {
-        imageCaptureBuilder.setTargetResolution(toSize(aspectRatioCustom, getSurfaceRotation()));
-      } else {
-        imageCaptureBuilder.setTargetAspectRatio(aspectRatio);
-      }
-      imageCapture = imageCaptureBuilder.build();
+    ImageCapture.Builder imageCaptureBuilder = new ImageCapture.Builder()
+      .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+      .setFlashMode(flashMode)
+      .setTargetRotation(getSurfaceRotation());
+    if (aspectRatioCustom != null) {
+      imageCaptureBuilder.setTargetResolution(toSize(aspectRatioCustom, getSurfaceRotation()));
     } else {
-      imageCapture.setFlashMode(flashMode);
-      imageCapture.setTargetRotation(getSurfaceRotation());
+      imageCaptureBuilder.setTargetAspectRatio(aspectRatio);
     }
-    if (REUSE_CAPTURE_DISABLED || videoCapture == null) {
-      VideoCapture.Builder b = new VideoCapture.Builder()
-        .setTargetRotation(getSurfaceRotation());
-      if (aspectRatioCustom != null) {
-        b.setTargetResolution(toSize(aspectRatioCustom, getSurfaceRotation()));
-      } else {
-        b.setTargetAspectRatio(aspectRatio);
-      }
-      videoCapture = b.build();
-    } else {
-      videoCapture.setTargetRotation(getSurfaceRotation());
-    }
+    imageCapture = imageCaptureBuilder.build();
+
+    Recorder recorder = new Recorder.Builder()
+      .setAspectRatio(aspectRatio)
+      .build();
+    VideoCapture.Builder<Recorder> b = new VideoCapture.Builder<>(recorder)
+      .setTargetRotation(getSurfaceRotation());
+    videoCapture = b.build();
 
     ImageAnalysis imageAnalyzer = new ImageAnalysis.Builder()
       .setTargetRotation(getSurfaceRotation())
@@ -274,10 +268,10 @@ public class CameraManagerX extends CameraManager<PreviewView> {
         if (REUSE_PREVIEW_DISABLED) {
           preview = null;
         }
-        if (REUSE_CAPTURE_DISABLED) {
-          videoCapture = null;
-          imageCapture = null;
-        }
+        videoRecordStatus = null;
+        videoRecording = null;
+        videoCapture = null;
+        imageCapture = null;
         cameraProvider = null;
         camera = null;
       }
@@ -483,24 +477,30 @@ public class CameraManagerX extends CameraManager<PreviewView> {
   protected boolean onStartVideoCapture (int outRotation) {
     if (videoCapture != null) {
       boolean success;
-      try {
-        File outFile = getOutputFile(true);
-        videoCapture.startRecording(new VideoCapture.OutputFileOptions.Builder(outFile).build(), ContextCompat.getMainExecutor(context), new VideoCapture.OnVideoSavedCallback() {
-          @Override
-          public void onVideoSaved (@NonNull VideoCapture.OutputFileResults ignored) {
-            U.toGalleryFile(outFile, true, file -> {
-              setTakingVideo(false, -1);
-              onTakeMediaResult(file, true);
-            });
+      File outFile = getOutputFile(true);
+      try (Recording recording = videoCapture.getOutput()
+        .prepareRecording(context, new FileOutputOptions.Builder(outFile).build())
+        .start(ContextCompat.getMainExecutor(context), event -> {
+          if (!(event instanceof VideoRecordEvent.Status)) {
+            videoRecordStatus = event;
           }
+          if (event instanceof VideoRecordEvent.Finalize) {
+            VideoRecordEvent.Finalize finalize = (VideoRecordEvent.Finalize) event;
 
-          @Override
-          public void onError (int videoCaptureError, @NonNull String message, @Nullable Throwable cause) {
-            setTakingVideo(false, -1);
-            Log.e(Log.TAG_CAMERA, "Failed to capture video: %d, message: %s", cause, videoCaptureError, message);
-            onTakeMediaError(true);
+            if (finalize.hasError()) {
+              setTakingVideo(false, -1);
+              Log.e(Log.TAG_CAMERA, "Failed to capture video: %d", finalize.getCause(), finalize.getError());
+              onTakeMediaError(true);
+            } else {
+              U.toGalleryFile(outFile, true, file -> {
+                setTakingVideo(false, -1);
+                onTakeMediaResult(file, true);
+              });
+            }
           }
-        });
+        })
+      ) {
+        videoRecording = recording;
         success = true;
       } catch (Throwable t) {
         Log.e("Cannot start recording video", t);
@@ -520,13 +520,17 @@ public class CameraManagerX extends CameraManager<PreviewView> {
   @SuppressWarnings("RestrictedApi")
   @Override
   protected void onFinishOrCancelVideoCapture () {
-    if (videoCapture != null) {
-      videoCapture.stopRecording();
-      if (flashMode == ImageCapture.FLASH_MODE_ON && camera.getCameraInfo().hasFlashUnit()) {
-        camera.getCameraControl().enableTorch(false);
-      }
-      delegate.onVideoCaptureEnded();
+    if (videoRecording != null) {
+      videoRecording.stop();
+      onVideoRecordingFinished();
     }
+  }
+
+  private void onVideoRecordingFinished () {
+    if (flashMode == ImageCapture.FLASH_MODE_ON && camera.getCameraInfo().hasFlashUnit()) {
+      camera.getCameraControl().enableTorch(false);
+    }
+    delegate.onVideoCaptureEnded();
   }
 
   @Override
